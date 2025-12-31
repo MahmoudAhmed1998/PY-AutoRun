@@ -16,6 +16,7 @@ class VideoAutomationGUI:
         self.is_running = False
         self.automation_thread = None
         self.cycle_count = 0
+        self.none_video_count = 0
 
         self.setup_ui()
 
@@ -79,6 +80,15 @@ class VideoAutomationGUI:
         )
         self.cycle_label.pack(side=tk.LEFT, padx=5)
 
+        tk.Label(status_frame, text="None Videos:", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(20, 0))
+        self.none_video_label = tk.Label(
+            status_frame,
+            text="0",
+            font=("Arial", 10),
+            fg="orange"
+        )
+        self.none_video_label.pack(side=tk.LEFT, padx=5)
+
         # Log area
         log_label = tk.Label(self.root, text="Logs:", font=("Arial", 10, "bold"))
         log_label.pack(anchor=tk.W, padx=10, pady=(10, 0))
@@ -122,11 +132,17 @@ class VideoAutomationGUI:
         """Update the cycle count label."""
         self.cycle_label.config(text=str(self.cycle_count))
 
+    def update_none_video_count(self):
+        """Update the none video count label."""
+        self.none_video_label.config(text=str(self.none_video_count))
+
     def start_automation(self):
         """Start the automation process."""
         self.is_running = True
         self.cycle_count = 0
+        self.none_video_count = 0
         self.update_cycle_count()
+        self.update_none_video_count()
 
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
@@ -144,7 +160,8 @@ class VideoAutomationGUI:
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
         self.update_status("Stopped", "red")
-        self.log(f"Automation stopped by user after {self.cycle_count} cycles", "INFO")
+        self.log(f"Automation stopped by user after {self.cycle_count} cycles ({self.none_video_count} none videos)",
+                 "INFO")
 
     def wait_for_image(self, image_path: str, confidence: float = 0.8,
                        timeout: int = 30, check_interval: float = 0.5) -> Optional[Tuple[int, int, int, int]]:
@@ -165,15 +182,46 @@ class VideoAutomationGUI:
         x, y, w, h = location
         pyautogui.click(x + w / 2, y + h / 2)
 
+    def handle_none_video(self) -> bool:
+        """Handle videos that don't have play/fullscreen buttons (none videos)."""
+        self.log("Detected none video - skipping directly to next", "INFO")
+        self.none_video_count += 1
+        self.update_none_video_count()
+
+        time.sleep(1)
+
+        # Click next button
+        self.log("Looking for next button...")
+        next_images = ["next1.png", "next2.png"]
+        next_clicked = False
+
+        for img in next_images:
+            self.log(f"Trying to locate {img}...")
+            next_location = self.wait_for_image(img, confidence=0.7, timeout=5)
+            if next_location:
+                self.log(f"Found {img}, clicking")
+                self.click_center(next_location)
+                next_clicked = True
+                break
+
+        if not next_clicked:
+            self.log("No next button found", "WARNING")
+            return False
+
+        self.log("None video handled successfully", "SUCCESS")
+        return True
+
     def process_video(self) -> bool:
         """Process one video cycle."""
         try:
-            # Click play button
+            # Check for play button with shorter timeout
             self.log("Looking for play button...")
-            play_location = self.wait_for_image('play.png', confidence=0.8, timeout=30)
+            play_location = self.wait_for_image('play.png', confidence=0.8, timeout=5)
+
             if not play_location:
-                self.log("Play button not found", "ERROR")
-                return False
+                # No play button found - likely a none video
+                self.log("Play button not found - treating as none video", "INFO")
+                return self.handle_none_video()
 
             self.log("Clicking play button")
             self.click_center(play_location)
@@ -181,10 +229,12 @@ class VideoAutomationGUI:
 
             # Click fullscreen button
             self.log("Looking for fullscreen button...")
-            fullscreen_location = self.wait_for_image('fullscreen.png', confidence=0.8, timeout=30)
+            fullscreen_location = self.wait_for_image('fullscreen.png', confidence=0.8, timeout=5)
+
             if not fullscreen_location:
-                self.log("Fullscreen button not found", "ERROR")
-                return False
+                # No fullscreen button - might be a none video or error
+                self.log("Fullscreen button not found - treating as none video", "INFO")
+                return self.handle_none_video()
 
             self.log("Clicking fullscreen button")
             self.click_center(fullscreen_location)
@@ -207,7 +257,7 @@ class VideoAutomationGUI:
 
             for img in next_images:
                 self.log(f"Trying to locate {img}...")
-                next_location = self.wait_for_image(img, confidence=0.7, timeout=2)
+                next_location = self.wait_for_image(img, confidence=0.7, timeout=5)
                 if next_location:
                     self.log(f"Found {img}, clicking")
                     self.click_center(next_location)
