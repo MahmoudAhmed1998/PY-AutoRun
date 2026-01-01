@@ -1,0 +1,494 @@
+from flask import Flask, render_template_string, request, jsonify
+import secrets
+
+app = Flask(__name__)
+app.secret_key = secrets.token_hex(16)
+
+# Server-side game state (shared across all clients)
+game_state = {
+    'board': [''] * 9,
+    'current_player': 'X',
+    'game_over': False,
+    'winner': None,
+    'winning_combo': None
+}
+
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Tic-Tac-Toe</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #1e1e2e 0%, #2d1b69 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 30px;
+            padding: 50px 40px;
+            box-shadow: 0 30px 90px rgba(0,0,0,0.4);
+            max-width: 550px;
+            width: 100%;
+        }
+        h1 {
+            text-align: center;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 15px;
+            font-size: 3em;
+            font-weight: 800;
+            letter-spacing: -1px;
+        }
+        .status {
+            text-align: center;
+            font-size: 1.3em;
+            margin: 20px 0 30px;
+            color: #555;
+            min-height: 35px;
+            font-weight: 600;
+        }
+        .board-container {
+            position: relative;
+            max-width: 420px;
+            margin: 0 auto;
+        }
+        .board {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            position: relative;
+            z-index: 1;
+        }
+        .cell {
+            aspect-ratio: 1;
+            background: #ffffff;
+            border: 3px solid #e5e7eb;
+            border-radius: 20px;
+            font-size: 3.5em;
+            font-weight: 900;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            color: #333;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+        }
+        .cell:hover:not(:disabled) {
+            background: #f9fafb;
+            border-color: #667eea;
+            transform: translateY(-5px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.3);
+        }
+        .cell:active:not(:disabled) {
+            transform: translateY(-2px);
+        }
+        .cell:disabled {
+            cursor: not-allowed;
+        }
+        .cell.x {
+            color: #667eea;
+            animation: pop 0.3s ease;
+        }
+        .cell.o {
+            color: #764ba2;
+            animation: pop 0.3s ease;
+        }
+        @keyframes pop {
+            0% { transform: scale(0.8); opacity: 0; }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .winner {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-weight: 800;
+            animation: pulse 1s ease infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        .reset-btn {
+            display: block;
+            margin: 35px auto 0;
+            padding: 18px 50px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 50px;
+            font-size: 1.1em;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        }
+        .reset-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 15px 40px rgba(102, 126, 234, 0.5);
+        }
+        .reset-btn:active {
+            transform: translateY(-1px);
+        }
+
+        .sync-indicator {
+            text-align: center;
+            font-size: 0.9em;
+            color: #10b981;
+            margin-top: 10px;
+            font-weight: 600;
+        }
+
+        /* Win line styles */
+        .win-line {
+            position: absolute;
+            background: linear-gradient(90deg, #10b981, #059669);
+            z-index: 10;
+            opacity: 0;
+            animation: drawLine 0.5s ease forwards;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(16, 185, 129, 0.6);
+        }
+        @keyframes drawLine {
+            0% {
+                opacity: 0;
+                transform: scale(0);
+            }
+            100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+
+        .confetti {
+            position: fixed;
+            width: 10px;
+            height: 10px;
+            background: #667eea;
+            position: absolute;
+            animation: confetti-fall 3s ease-out forwards;
+        }
+        @keyframes confetti-fall {
+            to {
+                transform: translateY(100vh) rotate(360deg);
+                opacity: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TIC TAC TOE</h1>
+        <div class="status" id="status">Player X's turn</div>
+        <div class="board-container">
+            <div class="board" id="board"></div>
+            <canvas id="lineCanvas" style="position: absolute; top: 0; left: 0; pointer-events: none; z-index: 5;"></canvas>
+        </div>
+        <button class="reset-btn" onclick="resetGame()">New Game</button>
+    </div>
+
+    <script>
+        let board = [];
+        let currentPlayer = 'X';
+        let gameOver = false;
+        let winningCombo = null;
+        let pollInterval;
+
+        function initBoard() {
+            const boardEl = document.getElementById('board');
+            boardEl.innerHTML = '';
+
+            const canvas = document.getElementById('lineCanvas');
+            const container = document.querySelector('.board-container');
+            canvas.width = container.offsetWidth;
+            canvas.height = container.offsetHeight;
+
+            for (let i = 0; i < 9; i++) {
+                const cell = document.createElement('button');
+                cell.className = 'cell';
+                cell.dataset.index = i;
+                cell.onclick = () => makeMove(i);
+                boardEl.appendChild(cell);
+            }
+
+            fetchGameState();
+            startPolling();
+        }
+
+        function startPolling() {
+            // Poll server every 500ms to sync game state
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(fetchGameState, 500);
+        }
+
+        function fetchGameState() {
+            fetch('/game_state')
+                .then(r => r.json())
+                .then(data => {
+                    const boardChanged = JSON.stringify(board) !== JSON.stringify(data.board);
+                    const winnerChanged = winningCombo !== data.winning_combo;
+
+                    board = data.board;
+                    currentPlayer = data.current_player;
+                    gameOver = data.game_over;
+                    winningCombo = data.winning_combo;
+
+                    updateBoard();
+                    updateStatus(data.winner);
+
+                    if (winningCombo && winnerChanged) {
+                        setTimeout(() => {
+                            drawWinLine(winningCombo);
+                            createConfetti();
+                        }, 100);
+                    }
+                });
+        }
+
+        function makeMove(position) {
+            if (gameOver) return;
+
+            fetch('/move', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({position: position})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    // Immediately update UI
+                    board = data.board;
+                    currentPlayer = data.current_player;
+                    gameOver = data.game_over;
+                    winningCombo = data.winning_combo;
+                    updateBoard();
+                    updateStatus(data.winner);
+                    if (winningCombo) {
+                        setTimeout(() => {
+                            drawWinLine(winningCombo);
+                            createConfetti();
+                        }, 100);
+                    }
+                }
+            });
+        }
+
+        function updateBoard() {
+            const cells = document.querySelectorAll('.cell');
+            cells.forEach((cell, i) => {
+                cell.textContent = board[i] || '';
+                cell.disabled = board[i] !== '' || gameOver;
+                cell.className = 'cell';
+                if (board[i] === 'X') cell.classList.add('x');
+                if (board[i] === 'O') cell.classList.add('o');
+            });
+        }
+
+        function updateStatus(winner) {
+            const status = document.getElementById('status');
+            if (winner) {
+                status.innerHTML = `<span class="winner">🎉 Player ${winner} Wins! 🎉</span>`;
+            } else if (gameOver) {
+                status.textContent = "It's a Draw!";
+            } else {
+                status.textContent = `Player ${currentPlayer}'s turn`;
+            }
+        }
+
+        function drawWinLine(combo) {
+            if (!combo) return;
+
+            const cells = document.querySelectorAll('.cell');
+            const boardRect = document.getElementById('board').getBoundingClientRect();
+            const containerRect = document.querySelector('.board-container').getBoundingClientRect();
+
+            const cell1 = cells[combo[0]].getBoundingClientRect();
+            const cell2 = cells[combo[2]].getBoundingClientRect();
+
+            const x1 = cell1.left + cell1.width / 2 - containerRect.left;
+            const y1 = cell1.top + cell1.height / 2 - containerRect.top;
+            const x2 = cell2.left + cell2.width / 2 - containerRect.left;
+            const y2 = cell2.top + cell2.height / 2 - containerRect.top;
+
+            const canvas = document.getElementById('lineCanvas');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const length = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+            const angle = Math.atan2(y2 - y1, x2 - x1);
+
+            ctx.save();
+            ctx.translate(x1, y1);
+            ctx.rotate(angle);
+
+            ctx.strokeStyle = '#10b981';
+            ctx.lineWidth = 8;
+            ctx.lineCap = 'round';
+            ctx.shadowColor = 'rgba(16, 185, 129, 0.6)';
+            ctx.shadowBlur = 20;
+
+            let progress = 0;
+            function animate() {
+                if (progress < length) {
+                    progress += length / 20;
+                    ctx.clearRect(-10, -10, length + 20, 20);
+                    ctx.beginPath();
+                    ctx.moveTo(0, 0);
+                    ctx.lineTo(Math.min(progress, length), 0);
+                    ctx.stroke();
+                    requestAnimationFrame(animate);
+                }
+            }
+            animate();
+
+            ctx.restore();
+        }
+
+        function createConfetti() {
+            const colors = ['#667eea', '#764ba2', '#10b981', '#f59e0b', '#ef4444'];
+            const container = document.querySelector('.board-container');
+
+            for (let i = 0; i < 50; i++) {
+                setTimeout(() => {
+                    const confetti = document.createElement('div');
+                    confetti.className = 'confetti';
+                    confetti.style.left = Math.random() * 100 + '%';
+                    confetti.style.background = colors[Math.floor(Math.random() * colors.length)];
+                    confetti.style.animationDelay = Math.random() * 0.5 + 's';
+                    confetti.style.animationDuration = (Math.random() * 2 + 2) + 's';
+                    container.appendChild(confetti);
+
+                    setTimeout(() => confetti.remove(), 3000);
+                }, i * 30);
+            }
+        }
+
+        function resetGame() {
+            const canvas = document.getElementById('lineCanvas');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            fetch('/reset', {method: 'POST'})
+                .then(() => {
+                    gameOver = false;
+                    winningCombo = null;
+                    fetchGameState();
+                });
+        }
+
+        window.addEventListener('resize', () => {
+            const canvas = document.getElementById('lineCanvas');
+            const container = document.querySelector('.board-container');
+            canvas.width = container.offsetWidth;
+            canvas.height = container.offsetHeight;
+            if (winningCombo) drawWinLine(winningCombo);
+        });
+
+        // Clean up polling on page unload
+        window.addEventListener('beforeunload', () => {
+            if (pollInterval) clearInterval(pollInterval);
+        });
+
+        initBoard();
+    </script>
+</body>
+</html>
+'''
+
+
+def init_game():
+    global game_state
+    game_state = {
+        'board': [''] * 9,
+        'current_player': 'X',
+        'game_over': False,
+        'winner': None,
+        'winning_combo': None
+    }
+
+
+def check_winner(board):
+    wins = [
+        [0, 1, 2], [3, 4, 5], [6, 7, 8],  # rows
+        [0, 3, 6], [1, 4, 7], [2, 5, 8],  # columns
+        [0, 4, 8], [2, 4, 6]  # diagonals
+    ]
+
+    for combo in wins:
+        if board[combo[0]] and board[combo[0]] == board[combo[1]] == board[combo[2]]:
+            return board[combo[0]], combo
+
+    if '' not in board:
+        return 'Draw', None
+
+    return None, None
+
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+
+@app.route('/game_state')
+def get_game_state():
+    return jsonify({
+        'board': game_state['board'],
+        'current_player': game_state['current_player'],
+        'game_over': game_state['game_over'],
+        'winner': game_state.get('winner'),
+        'winning_combo': game_state.get('winning_combo')
+    })
+
+
+@app.route('/move', methods=['POST'])
+def move():
+    data = request.json
+    pos = data['position']
+
+    if game_state['game_over'] or game_state['board'][pos]:
+        return jsonify({'success': False})
+
+    game_state['board'][pos] = game_state['current_player']
+    result, combo = check_winner(game_state['board'])
+
+    if result:
+        game_state['game_over'] = True
+        game_state['winner'] = result if result != 'Draw' else None
+        game_state['winning_combo'] = combo
+    else:
+        game_state['current_player'] = 'O' if game_state['current_player'] == 'X' else 'X'
+
+    return jsonify({
+        'success': True,
+        'board': game_state['board'],
+        'current_player': game_state['current_player'],
+        'game_over': game_state['game_over'],
+        'winner': game_state.get('winner'),
+        'winning_combo': game_state.get('winning_combo')
+    })
+
+
+@app.route('/reset', methods=['POST'])
+def reset():
+    init_game()
+    return jsonify({'success': True})
+
+
+if __name__ == '__main__':
+    app.run(host="0.0.0.0", port=5000)
